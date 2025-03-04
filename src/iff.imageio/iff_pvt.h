@@ -4,7 +4,7 @@
 
 #pragma once
 
-// Maya Fileformats Version 6: 
+// Maya Fileformats Version 6:
 //   https://courses.cs.washington.edu/courses/cse458/05au/help/mayaguide/Reference/FileFormats.pdf
 // Format reference: Affine Toolkit (Thomas E. Burge):
 //   riff.h and riff.c
@@ -46,10 +46,10 @@ public:
     uint32_t width;
     uint32_t height;
     uint32_t compression;
-    uint8_t pixel_bits;
-    uint8_t pixel_channels;
+    uint8_t channel_bits;
+    uint8_t channel_count;
     uint8_t zbuffer_bits;
-    uint8_t zbuffer_channel;
+    uint8_t zbuffer_count;
     uint16_t tiles;
     uint16_t tile_width;
     uint16_t tile_height;
@@ -65,20 +65,20 @@ public:
 
     // for4 start
     uint32_t for4_start;
-    
-    uint8_t channel_bytes() const {
-        return (pixel_bits / 8);
+
+    uint8_t channel_bytes() const { return (channel_bits / 8); }
+
+    uint8_t zbuffer_bytes() const
+    {
+        return zbuffer_count ? (zbuffer_bits / 8) : 0;
     }
 
-    uint8_t pixel_bytes() const {
-        return channel_bytes() * pixel_channels;
+    uint8_t pixel_bytes() const
+    {
+        return channel_bytes() * channel_count + zbuffer_bytes();
     }
 
-    uint8_t zbuffer_bytes() const {
-        return zbuffer_channel ? (zbuffer_bits / 8) : 0;
-    }
-
-private:
+    uint64_t image_bytes() const { return pixel_bytes() * width * height; }
 };
 
 

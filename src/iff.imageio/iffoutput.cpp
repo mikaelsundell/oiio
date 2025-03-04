@@ -196,15 +196,15 @@ IffOutput::open(const std::string& name, const ImageSpec& spec, OpenMode mode)
         = (m_spec.get_string_attribute("compression") == "none") ? NONE : RLE;
 
     // we write the header of the file
-    m_iff_header.x              = m_spec.x;
-    m_iff_header.y              = m_spec.y;
-    m_iff_header.width          = m_spec.width;
-    m_iff_header.height         = m_spec.height;
-    m_iff_header.tiles          = xtiles * ytiles;
-    m_iff_header.pixel_bits     = m_spec.format == TypeDesc::UINT8 ? 8 : 16;
-    m_iff_header.pixel_channels = m_spec.nchannels;
-    m_iff_header.author         = m_spec.get_string_attribute("Artist");
-    m_iff_header.date           = m_spec.get_string_attribute("DateTime");
+    m_iff_header.x             = m_spec.x;
+    m_iff_header.y             = m_spec.y;
+    m_iff_header.width         = m_spec.width;
+    m_iff_header.height        = m_spec.height;
+    m_iff_header.tiles         = xtiles * ytiles;
+    m_iff_header.channel_bits  = m_spec.format == TypeDesc::UINT8 ? 8 : 16;
+    m_iff_header.channel_count = m_spec.nchannels;
+    m_iff_header.author        = m_spec.get_string_attribute("Artist");
+    m_iff_header.date          = m_spec.get_string_attribute("DateTime");
 
     if (!write_header(m_iff_header)) {
         errorfmt("\"{}\": could not write iff header", m_filename);
@@ -246,8 +246,8 @@ IffOutput::write_header(IffFileHeader& header)
         return false;
 
     // write flags and channels
-    if (!write_int(header.pixel_channels == 3 ? RGB : RGBA)
-        || !write_short(header.pixel_bits == 8 ? 0 : 1)
+    if (!write_int(header.channel_count == 3 ? RGB : RGBA)
+        || !write_short(header.channel_bits == 8 ? 0 : 1)
         || !write_short(header.tiles))
         return false;
 
@@ -373,7 +373,7 @@ IffOutput::close(void)
             // write x-tiles
             for (uint32_t tx = 0; tx < tile_width_size(m_spec.width); tx++) {
                 // channels
-                uint8_t channels = m_iff_header.pixel_channels;
+                uint8_t channels = m_iff_header.channel_count;
 
                 // set tile coordinates
                 uint32_t xmin = tx * tile_width();
@@ -512,7 +512,7 @@ IffOutput::close(void)
                         if (littleendian()) {
                             int rgb16[]  = { 0, 2, 4, 1, 3, 5 };
                             int rgba16[] = { 0, 2, 4, 7, 1, 3, 5, 6 };
-                            if (m_iff_header.pixel_channels == 3) {
+                            if (m_iff_header.channel_count == 3) {
                                 map = std::vector<uint8_t>(rgb16, &rgb16[6]);
                             } else {
                                 map = std::vector<uint8_t>(rgba16, &rgba16[8]);
@@ -521,7 +521,7 @@ IffOutput::close(void)
                         } else {
                             int rgb16[]  = { 1, 3, 5, 0, 2, 4 };
                             int rgba16[] = { 1, 3, 5, 7, 0, 2, 4, 6 };
-                            if (m_iff_header.pixel_channels == 3) {
+                            if (m_iff_header.channel_count == 3) {
                                 map = std::vector<uint8_t>(rgb16, &rgb16[6]);
                             } else {
                                 map = std::vector<uint8_t>(rgba16, &rgba16[8]);

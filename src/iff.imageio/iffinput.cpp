@@ -51,6 +51,7 @@ private:
 
     // helper to uncompress a rle channel
     size_t uncompress_rle_channel(const uint8_t* in, uint8_t* out, int size);
+    void realign_uncompressed_rle_channel(uint8_t* in, float* out, int size);
 
     /// Helper: read buf[0..nitems-1], swap endianness if necessary
     template<typename T> bool read(T* buf, size_t nitems = 1)
@@ -174,17 +175,22 @@ IffInput::open(const std::string& name, ImageSpec& spec)
     }
 
     // set types and channels
-    TypeDesc type = (m_iff_header.pixel_bits == 8) ? TypeDesc::UINT8 : TypeDesc::UINT16;
-    int num_channels = m_iff_header.pixel_channels + (m_iff_header.zbuffer_channel ? 1 : 0);
-    m_spec = ImageSpec(m_iff_header.width, m_iff_header.height, num_channels, type);
+    TypeDesc type    = (m_iff_header.channel_bits == 8) ? TypeDesc::UINT8
+                                                        : TypeDesc::UINT16;
+    int num_channels = m_iff_header.channel_count
+                       + (m_iff_header.zbuffer_count ? 1 : 0);
+    m_spec = ImageSpec(m_iff_header.width, m_iff_header.height, num_channels,
+                       type);
 
-    if (m_iff_header.zbuffer_channel) {
+    if (m_iff_header.zbuffer_count) {
         m_spec.channelformats.assign(num_channels, type);
         m_spec.channelformats.back() = TypeDesc::FLOAT;
-        m_spec.channelnames = { "R", "G", "B" };
-        if (m_iff_header.pixel_channels == 4) {
+        m_spec.channelnames          = { "R", "G", "B" };
+        if (m_iff_header.channel_count == 4) {
+            m_spec.alpha_channel = m_spec.channelnames.size();
             m_spec.channelnames.push_back("A");
         }
+        m_spec.z_channel = m_spec.channelnames.size();
         m_spec.channelnames.push_back("Z");
     }
 
@@ -279,7 +285,8 @@ IffInput::read_header()
 
                         // test if table header size is correct
                         if (tbhdsize != 24 && tbhdsize != 32) {
-                            errorfmt("IFF error Bad table header size {}", tbhdsize);
+                            errorfmt("IFF error Bad table header size {}",
+                                     tbhdsize);
                             return false;  // bad table header
                         }
 
@@ -314,7 +321,8 @@ IffInput::read_header()
                         // 2 QRL (not supported)
                         // 3 QR4 (not supported)
                         if (m_iff_header.compression > 1) {
-                            errorfmt("IFF error only RLE compression is supported");
+                            errorfmt(
+                                "IFF error only RLE compression is supported");
                             return false;
                         }
 
@@ -325,26 +333,26 @@ IffInput::read_header()
 
                             // test for RGB channels.
                             if (flags & RGB)
-                                m_iff_header.pixel_channels = 3;
+                                m_iff_header.channel_count = 3;
 
                             // test for alpha channel
                             if (flags & ALPHA)
-                                m_iff_header.pixel_channels++;
-                            
+                                m_iff_header.channel_count++;
+
                             // set pixel bits
-                            m_iff_header.pixel_bits = bytes ? 16 : 8;
-                            
+                            m_iff_header.channel_bits = bytes ? 16 : 8;
+
                             if (flags & ZBUFFER)
-                                m_iff_header.zbuffer_channel = 1;
-                            
+                                m_iff_header.zbuffer_count = 1;
+
                             // set zbuffer bits
                             m_iff_header.zbuffer_bits = 32;
                         }
 
                         // Z format.
                         else if (flags & ZBUFFER) {
-                            m_iff_header.pixel_channels = 1;
-                            m_iff_header.pixel_bits     = 32;  // 32bit
+                            m_iff_header.channel_count = 1;
+                            m_iff_header.channel_bits  = 32;  // 32bit
                             // NOTE: Z_F32 support - not supported
                             OIIO_DASSERT(bytes == 0);
                         }
@@ -363,16 +371,17 @@ IffInput::read_header()
                             if (type[0] == 'A' && type[1] == 'U'
                                 && type[2] == 'T' && type[3] == 'H') {
                                 std::vector<char> str(chunksize);
-                                if (!ioread(&str[0], 1, chunksize))
+                                if (!ioread(str.data(), 1, chunksize))
                                     return false;
-                                m_iff_header.author = std::string(&str[0],
+                                m_iff_header.author = std::string(str.data(),
                                                                   size);
                             } else if (type[0] == 'D' && type[1] == 'A'
                                        && type[2] == 'T' && type[3] == 'E') {
                                 std::vector<char> str(chunksize);
-                                if (!ioread(&str[0], 1, chunksize))
+                                if (!ioread(str.data(), 1, chunksize))
                                     return false;
-                                m_iff_header.date = std::string(&str[0], size);
+                                m_iff_header.date = std::string(str.data(),
+                                                                size);
                             } else if (type[0] == 'F' && type[1] == 'O'
                                        && type[2] == 'R' && type[3] == '4') {
                                 if (!ioread(&type, 1, sizeof(type)))
@@ -422,7 +431,8 @@ IffInput::read_header()
 
                                         // skip to the next block.
                                         if (!ioseek(chunksize, SEEK_CUR)) {
-                                            errorfmt("IFF error io seek failed");
+                                            errorfmt(
+                                                "IFF error io seek failed");
                                             return false;
                                         }
                                     }
@@ -499,12 +509,12 @@ IffInput::read_native_tile(int subimage, int miplevel, int x, int y, int /*z*/,
     int oy = 0;
     for (int iy = y; iy < y + th; iy++) {
         // in
-        uint8_t* in_p = &m_buf[0] + (iy * w + x) * m_spec.pixel_bytes();
+        uint8_t* in_p = m_buf.data() + (iy * w + x) * m_spec.pixel_bytes(true);
         // out
         uint8_t* out_p = (uint8_t*)data
-                         + (oy * m_spec.tile_width) * m_spec.pixel_bytes();
+                         + (oy * m_spec.tile_width) * m_spec.pixel_bytes(true);
         // copy
-        memcpy(out_p, in_p, tw * m_spec.pixel_bytes());
+        memcpy(out_p, in_p, tw * m_spec.pixel_bytes(true));
         oy++;
     }
     return true;
@@ -519,7 +529,6 @@ bool inline IffInput::close(void)
 }
 
 
-
 bool
 IffInput::readimg()
 {
@@ -532,102 +541,98 @@ IffInput::readimg()
     ioseek(m_tbmp_start);
 
     // resize buffer
-    m_buf.resize(m_spec.image_bytes());
+    m_buf.resize(m_iff_header.image_bytes());
 
     for (unsigned int t = 0; t < m_iff_header.tiles;) {
-        
-        Strutil::print("reading tile {}\n", t);
-        
         // get type and length
         if (!ioread(&type, 1, sizeof(type)) || !read(&size)) {
             errorfmt("IFF error io could not read rgb(a) type");
             return false;
         }
-        
+
         chunksize = align_size(size, 4);
-        
+
         // check if RGBA
         if (type[0] == 'R' && type[1] == 'G' && type[2] == 'B'
             && type[3] == 'A') {
-            
-            Strutil::print("reading RGBA for tile {}\n", t);
-            
             // get tile coordinates.
             uint16_t xmin, xmax, ymin, ymax;
             if (!read(&xmin) || !read(&ymin) || !read(&xmax) || !read(&ymax)) {
                 errorfmt("IFF error io read xmin, ymin, xmax and ymax failed");
                 return false;
             }
-            
+
             // get tile width/height
             uint32_t tw = xmax - xmin + 1;
             uint32_t th = ymax - ymin + 1;
-            
+
             // get image size
             // skip coordinates, uint16_t (2) * 4 = 8
             uint32_t image_size = chunksize - 8;
-            
+
             // check tile
             if (xmin > xmax || ymin > ymax || xmax >= m_spec.width
                 || ymax >= m_spec.height || !tw || !th) {
-                errorfmt("IFF error io xmin, ymin, xmax or ymax does not match");
+                errorfmt(
+                    "IFF error io xmin, ymin, xmax or ymax does not match");
                 return false;
             }
-            
+
             // tile compress
             bool tile_compress = false;
-            
+
             // if tile compression fails to be less than image data stored
             // uncompressed the tile is written uncompressed
-            
+
             // set channels
-            uint8_t channels = m_iff_header.pixel_channels;
-            
+            uint8_t channels = m_iff_header.channel_count;
+
             // set tile size
-            uint32_t tile_size = tw * th * channels * m_iff_header.channel_bytes()
-            + 8;
-            
+            uint32_t tile_size
+                = tw * th * channels * m_iff_header.channel_bytes() + 8;
+
             // test if compressed
             // we use the non aligned size
             if (tile_size > size) {
                 tile_compress = true;
             }
-            
+
             // handle 8-bit data.
-            if (m_iff_header.pixel_bits == 8) {
+            if (m_iff_header.channel_bits == 8) {
                 std::vector<uint8_t> scratch;
-                
+
                 // set bytes.
                 scratch.resize(image_size);
-                
+
                 if (!ioread(scratch.data(), 1, scratch.size())) {
                     errorfmt("IFF error io seek failed");
                     return false;
                 }
-                
+
                 // set tile data
-                uint8_t* p = static_cast<uint8_t*>(&scratch[0]);
-                
-                // tile compress.
+                uint8_t* p = scratch.data();
+
+                // tile compress
                 if (tile_compress) {
                     // map BGR(A) to RGB(A)
-                    for (int c = (channels * m_iff_header.channel_bytes()) - 1;
-                         c >= 0; --c) {
+                    for (int c = channels * m_spec.channel_bytes() - 1; c >= 0;
+                         --c) {
                         std::vector<uint8_t> in(tw * th);
-                        uint8_t* in_p = &in[0];
-                        
+                        uint8_t* in_p = in.data();
+
                         // uncompress and increment
                         p += uncompress_rle_channel(p, in_p, tw * th);
-                        
+
                         // set tile
                         for (uint16_t py = ymin; py <= ymax; py++) {
-                            uint8_t* out_dy = static_cast<uint8_t*>(&m_buf[0])
-                            + (py * m_iff_header.width)
-                            * m_iff_header.pixel_bytes();
-                            
+                            uint8_t* out_dy = m_buf.data()
+                                              + (py * m_iff_header.width)
+                                                    * m_iff_header.pixel_bytes();
+
                             for (uint16_t px = xmin; px <= xmax; px++) {
                                 uint8_t* out_p
-                                = out_dy + px * m_iff_header.pixel_bytes() + c;
+                                    = out_dy + px * m_iff_header.pixel_bytes()
+                                      + c;
                                 *out_p++ = *in_p++;
                             }
                         }
@@ -635,21 +640,24 @@ IffInput::readimg()
                 } else {
                     int sy = 0;
                     for (uint16_t py = ymin; py <= ymax; py++) {
-                        uint8_t* out_dy = static_cast<uint8_t*>(&m_buf[0])
-                        + (py * m_iff_header.width + xmin)
-                        * m_iff_header.pixel_bytes();
-                        
+                        uint8_t* out_dy = m_buf.data()
+                                          + (py * m_iff_header.width + xmin)
+                                                * m_iff_header.pixel_bytes();
+
                         // set tile
                         int sx = 0;
                         for (uint16_t px = xmin; px <= xmax; px++) {
-                            uint8_t* in_p
-                            = p + (sy * tw + sx) * m_iff_header.pixel_bytes();
-                            
+                            uint8_t* in_p = p
+                                            + (sy * tw + sx)
+                                                  * m_iff_header.pixel_bytes();
+
                             // map BGR(A) to RGB(A)
-                            for (int c = channels - 1; c >= 0; --c) {
-                                uint8_t* out_p = in_p
-                                + (c * m_iff_header.channel_bytes());
-                                *out_dy++ = *out_p;
+                            for (int c = m_iff_header.pixel_bytes()
+                                         - (channels * m_spec.channel_bytes())
+                                         - 1;
+                                 c >= 0; --c) {
+                                uint8_t* out_p = in_p + c;
+                                *out_dy++      = *out_p;
                             }
                             sx++;
                         }
@@ -658,62 +666,65 @@ IffInput::readimg()
                 }
             }
             // handle 16-bit data.
-            else if (m_iff_header.pixel_bits == 16) {
+            else if (m_iff_header.channel_bits == 16) {
                 std::vector<uint8_t> scratch;
-                
+
                 // set bytes.
                 scratch.resize(image_size);
-                
+
                 if (!ioread(scratch.data(), 1, scratch.size())) {
                     errorfmt("IFF error io seek failed");
                     return false;
                 }
-                
+
                 // set tile data
-                uint8_t* p = static_cast<uint8_t*>(&scratch[0]);
-                
+                uint8_t* p = scratch.data();
+
                 if (tile_compress) {
                     // set map
                     std::vector<uint8_t> map;
                     if (littleendian()) {
                         int rgb16[]  = { 0, 2, 4, 1, 3, 5 };
                         int rgba16[] = { 0, 2, 4, 6, 1, 3, 5, 7 };
-                        if (m_iff_header.pixel_channels == 3) {
+                        if (m_iff_header.channel_count == 3) {
                             map = std::vector<uint8_t>(rgb16, &rgb16[6]);
                         } else {
                             map = std::vector<uint8_t>(rgba16, &rgba16[8]);
                         }
-                        
+
                     } else {
                         int rgb16[]  = { 1, 3, 5, 0, 2, 4 };
                         int rgba16[] = { 1, 3, 5, 7, 0, 2, 4, 6 };
-                        if (m_iff_header.pixel_channels == 3) {
+                        if (m_iff_header.channel_count == 3) {
                             map = std::vector<uint8_t>(rgb16, &rgb16[6]);
                         } else {
                             map = std::vector<uint8_t>(rgba16, &rgba16[8]);
                         }
                     }
-                    
+
                     // map BGR(A)BGR(A) to RRGGBB(AA)
-                    for (int c = (channels * m_iff_header.channel_bytes()) - 1;
+                    for (int c = m_iff_header.pixel_bytes()
+                                 - (channels * m_iff_header.channel_bytes())
+                                 - 1;
                          c >= 0; --c) {
                         int mc = map[c];
-                        
+
                         std::vector<uint8_t> in(tw * th);
-                        uint8_t* in_p = &in[0];
-                        
+                        uint8_t* in_p = in.data();
+
                         // uncompress and increment
                         p += uncompress_rle_channel(p, in_p, tw * th);
-                        
+
                         // set tile
                         for (uint16_t py = ymin; py <= ymax; py++) {
                             uint8_t* out_dy = static_cast<uint8_t*>(&m_buf[0])
-                            + (py * m_iff_header.width)
-                            * m_iff_header.pixel_bytes();
-                            
+                                              + (py * m_iff_header.width)
+                                                    * m_iff_header.pixel_bytes();
+
                             for (uint16_t px = xmin; px <= xmax; px++) {
                                 uint8_t* out_p
-                                = out_dy + px * m_iff_header.pixel_bytes() + mc;
+                                    = out_dy + px * m_iff_header.pixel_bytes()
+                                      + mc;
                                 *out_p++ = *in_p++;
                             }
                         }
@@ -721,26 +732,30 @@ IffInput::readimg()
                 } else {
                     int sy = 0;
                     for (uint16_t py = ymin; py <= ymax; py++) {
-                        uint8_t* out_dy = static_cast<uint8_t*>(&m_buf[0])
-                        + (py * m_iff_header.width + xmin)
-                        * m_iff_header.pixel_bytes();
-                        
+                        uint8_t* out_dy = m_buf.data()
+                                          + (py * m_iff_header.width + xmin)
+                                                * m_iff_header.pixel_bytes();
+
                         // set scanline, make copy easier
-                        std::vector<uint16_t> scanline(tw
-                                                       * m_iff_header.pixel_bytes());
-                        uint16_t* sl_p = &scanline[0];
-                        
+                        std::vector<uint16_t> scanline(
+                            tw * m_iff_header.pixel_bytes());
+                        uint16_t* sl_p = scanline.data();
+
                         // set tile
                         int sx = 0;
                         for (uint16_t px = xmin; px <= xmax; px++) {
-                            uint8_t* in_p
-                            = p + (sy * tw + sx) * m_iff_header.pixel_bytes();
-                            
+                            uint8_t* in_p = p
+                                            + (sy * tw + sx)
+                                                  * m_iff_header.pixel_bytes();
+
                             // map BGR(A) to RGB(A)
-                            for (int c = channels - 1; c >= 0; --c) {
+                            for (int c = m_iff_header.pixel_bytes()
+                                         - (channels
+                                            * m_iff_header.channel_bytes())
+                                         - 1;
+                                 c >= 0; --c) {
                                 uint16_t pixel;
-                                uint8_t* out_p = in_p
-                                + (c * m_iff_header.channel_bytes());
+                                uint8_t* out_p = in_p + c;
                                 memcpy(&pixel, out_p, 2);
                                 // swap endianness
                                 if (littleendian()) {
@@ -751,20 +766,18 @@ IffInput::readimg()
                             sx++;
                         }
                         // copy data
-                        memcpy(out_dy, &scanline[0], tw * m_iff_header.pixel_bytes());
+                        memcpy(out_dy, scanline.data(),
+                               tw * m_iff_header.pixel_bytes());
                         sy++;
                     }
                 }
-                
+
             } else {
                 errorfmt("\"{}\": unsupported number of bits per pixel for tile",
                          m_filename);
                 return false;
             }
-            
-            // tile
-            t++;
-            
+
         } else {
             // skip to the next block
             if (!ioseek(chunksize)) {
@@ -772,85 +785,110 @@ IffInput::readimg()
                 return false;
             }
         }
-        
-        if (m_iff_header.zbuffer_channel) {
-            
+
+        if (m_iff_header.zbuffer_count) {
             // get type and length
             if (!ioread(&type, 1, sizeof(type)) || !read(&size)) {
                 errorfmt("IFF error io could not read type");
                 return false;
             }
-            
+
             chunksize = align_size(size, 4);
-            
+
             // check if ZBUF
-            if (type[0] == 'Z' && type[1] == 'B' && type[2] == 'U' && type[3] == 'F') {
-                
-                Strutil::print("reading ZBUF for tile {}\n", t);
-                
+            if (type[0] == 'Z' && type[1] == 'B' && type[2] == 'U'
+                && type[3] == 'F') {
                 // get tile coordinates.
                 uint16_t xmin, xmax, ymin, ymax;
-                if (!read(&xmin) || !read(&ymin) || !read(&xmax) || !read(&ymax)) {
-                    errorfmt("IFF error io read xmin, ymin, xmax and ymax failed");
+                if (!read(&xmin) || !read(&ymin) || !read(&xmax)
+                    || !read(&ymax)) {
+                    errorfmt(
+                        "IFF error io read xmin, ymin, xmax and ymax failed");
                     return false;
                 }
-                
+
                 // get tile width/height
                 uint32_t tw = xmax - xmin + 1;
                 uint32_t th = ymax - ymin + 1;
-                
+
                 // get image size
                 // skip coordinates, uint16_t (2) * 4 = 8
                 uint32_t image_size = chunksize - 8;
-                
+
                 // check tile
                 if (xmin > xmax || ymin > ymax || xmax >= m_spec.width
                     || ymax >= m_spec.height || !tw || !th) {
-                    errorfmt("IFF error io xmin, ymin, xmax or ymax does not match");
+                    errorfmt(
+                        "IFF error io xmin, ymin, xmax or ymax does not match");
                     return false;
                 }
-                
+
                 // tile compress
                 bool tile_compress = false;
-                
+
+                // set tile size
+                uint32_t tile_size = tw * th * m_iff_header.zbuffer_bytes() + 8;
+
                 // if tile compression fails to be less than image data stored
                 // uncompressed the tile is written uncompressed
-                
-                // set channels
-                uint8_t channels = m_iff_header.zbuffer_channel;
-                
-                // set tile size
-                uint32_t tile_size = tw * th * channels * m_iff_header.zbuffer_bytes() + 8;
-                
-                // test if compressed
-                // we use the non aligned size
                 if (tile_size > size) {
                     tile_compress = true;
                 }
-                
+
                 std::vector<uint8_t> scratch;
-                
+
                 // set bytes.
                 scratch.resize(image_size);
-                
+
                 if (!ioread(scratch.data(), 1, scratch.size())) {
                     errorfmt("IFF error io seek failed");
                     return false;
                 }
-                
+
                 if (tile_compress) {
-                    
-                    print("reading compressed ZBUF tile");
+                    std::vector<uint8_t> in(
+                        tw * th
+                        * sizeof(float));  // Allocate storage for floats
+
+                    uint8_t* in_px = (uint8_t*)&in[0];
+
+                    uncompress_rle_channel(&scratch[0], in_px,
+                                           tw * th * sizeof(float));
+
+                    std::vector<float> realigned_data(
+                        tw * th);  // Buffer for correctly aligned floats
+                    realign_uncompressed_rle_channel(&in[0],
+                                                     realigned_data.data(),
+                                                     tw * th);
+                    float* pxp = &realigned_data[0];
+
+                    // Set tile (Z only)
+                    for (uint16_t py = ymin; py <= ymax; py++) {
+                        uint8_t* out_dy = m_buf.data()
+                                          + +(py * m_iff_header.width)
+                                                * m_iff_header.pixel_bytes();
+
+                        for (uint16_t px = xmin; px <= xmax; px++) {
+                            float* out_p
+                                = (float*)(out_dy
+                                           + px * m_iff_header.pixel_bytes()
+                                           + (m_iff_header.channel_count
+                                              * m_iff_header
+                                                    .channel_bytes()));  // Ensure correct placement
+
+
+                            // todo ms: this is not nice, for visualisation only
+                            float v = *pxp++;
+                            if (v < 0) {
+                                v = fabs(v) * 100;
+                            }
+                            *out_p = v;
+                        }
+                    }
+                } else {
+                    OIIO_ASSERT("z-buffer data is not uncompressed");
                 }
-                else {
-                    
-                    print("reading uncompressed ZBUF tile");
-                    
-                }
-                
-                
-            }
-            else {
+            } else {
                 // skip to the next block
                 if (!ioseek(chunksize)) {
                     errorfmt("IFF error io seek failed");
@@ -858,29 +896,28 @@ IffInput::readimg()
                 }
             }
         }
+
+        // tile
+        t++;
     }
 
     // flip buffer to make read_native_tile easier,
     // from tga.imageio:
-    
-    // todo ms: will be fixed
 
-    //int bytespp = m_iff_header.pixel_bytes();
+    int bytespp = m_iff_header.pixel_bytes();
 
-    //std::vector<unsigned char> flip(m_spec.width * bytespp);
-    //unsigned char *src, *dst, *tmp = &flip[0];
-    //for (int y = 0; y < m_spec.height / 2; y++) {
-    //    src = &m_buf[(m_spec.height - y - 1) * m_spec.width * bytespp];
-    //    dst = &m_buf[y * m_spec.width * bytespp];
-    //
-    //    memcpy(tmp, src, m_spec.width * bytespp);
-    //    memcpy(src, dst, m_spec.width * bytespp);
-    //    memcpy(dst, tmp, m_spec.width * bytespp);
-    //}
+    std::vector<unsigned char> flip(m_spec.width * bytespp);
+    unsigned char *src, *dst, *tmp = flip.data();
+    for (int y = 0; y < m_spec.height / 2; y++) {
+        src = &m_buf[(m_spec.height - y - 1) * m_spec.width * bytespp];
+        dst = &m_buf[y * m_spec.width * bytespp];
 
+        memcpy(tmp, src, m_spec.width * bytespp);
+        memcpy(src, dst, m_spec.width * bytespp);
+        memcpy(dst, tmp, m_spec.width * bytespp);
+    }
     return true;
 }
-
 
 
 size_t
@@ -888,27 +925,41 @@ IffInput::uncompress_rle_channel(const uint8_t* in, uint8_t* out, int size)
 {
     const uint8_t* const _in = in;
     const uint8_t* const end = out + size;
+    int bytes                = 0;
 
     while (out < end) {
-        // information.
+        //OIIO_ASSERT(in >= _in + size && "reached end of input buffer prematurely");
         const uint8_t count = (*in & 0x7f) + 1;
         const bool run      = (*in & 0x80) ? true : false;
+        //OIIO_ASSERT(out + count > end && "rle count exceeds available buffer");
         ++in;
 
-        // find runs
         if (!run) {
-            // verbatim
-            for (int i = 0; i < count; i++)
+            for (int i = 0; i < count; i++) {
                 *out++ = *in++;
+                bytes++;
+            }
         } else {
-            // duplicate
             const uint8_t p = *in++;
-            for (int i = 0; i < count; i++)
+            for (int i = 0; i < count; i++) {
                 *out++ = p;
+                bytes++;
+            }
         }
     }
-    const size_t r = in - _in;
-    return r;
+    OIIO_ASSERT(bytes == size && "uncompressed bytes does not match size");
+    return in - _in;
+}
+
+
+void
+IffInput::realign_uncompressed_rle_channel(uint8_t* in, float* out, int size)
+{
+    for (int i = 0; i < size; i++) {
+        uint32_t val = (in[i] << 24) | (in[i + size] << 16)
+                       | (in[i + 2 * size] << 8) | (in[i + 3 * size]);
+        out[i] = reinterpret_cast<float&>(val);
+    }
 }
 
 OIIO_PLUGIN_NAMESPACE_END
