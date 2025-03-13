@@ -399,7 +399,7 @@ IffOutput::close(void)
                 uint32_t tile_length = length;
 
                 // align.
-                length = align_size(length, 4);
+                length = align_chunk(length, 4);
 
                 // append xmin, xmax, ymin and ymax.
                 length += 8;
@@ -461,7 +461,7 @@ IffOutput::close(void)
                             length = index + 8;
 
                             // set length
-                            uint32_t align = align_size(length, 4);
+                            uint32_t align = align_chunk(length, 4);
                             if (align > length) {
                                 if (scratch.size() < index + align - length)
                                     scratch.resize(index + align - length);
@@ -571,7 +571,7 @@ IffOutput::close(void)
                             length = index + 8;
 
                             // set length
-                            uint32_t align = align_size(length, 4);
+                            uint32_t align = align_chunk(length, 4);
                             if (align > length) {
                                 if (scratch.size() < index + align - length)
                                     scratch.resize(index + align - length);

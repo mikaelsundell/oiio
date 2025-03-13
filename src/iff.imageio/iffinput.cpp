@@ -51,7 +51,7 @@ private:
 
     // helper to uncompress a rle channel
     size_t uncompress_rle_channel(const uint8_t* in, uint8_t* out, int size);
-    void realign_uncompressed_rle_channel(uint8_t* in, float* out, int size);
+    void unpack_float_channel(uint8_t* in, float* out, int size);
 
     /// Helper: read buf[0..nitems-1], swap endianness if necessary
     template<typename T> bool read(T* buf, size_t nitems = 1)
@@ -90,12 +90,16 @@ private:
         return read_type_len(name, len) && read_str(val, len);
     }
 
+
+
     // Read a 4-byte type code (no endian swap), and if that succeeds (beware
     // of EOF or other errors), then also read a 32 bit size (subject to
     // endian swap).
-    bool read_typesize(uint8_t type[4], uint32_t& size)
+    bool read_type(uint8_t type[4]) { return ioread(type, 1, 4); }
+
+    bool read_chunk(uint8_t type[4], uint32_t& size)
     {
-        return ioread(type, 1, 4) && read(&size);
+        return read_type(type) && read(&size);
     }
 };
 
@@ -122,7 +126,14 @@ OIIO_EXPORT const char* iff_input_extensions[] = { "iff", "z", nullptr };
 
 OIIO_PLUGIN_EXPORTS_END
 
-
+constexpr uint8_t iff_auth_tag[4] = { 'A', 'U', 'T', 'H' };
+constexpr uint8_t iff_date_tag[4] = { 'D', 'A', 'T', 'E' };
+constexpr uint8_t iff_for4_tag[4] = { 'F', 'O', 'R', '4' };
+constexpr uint8_t iff_cimg_tag[4] = { 'C', 'I', 'M', 'G' };
+constexpr uint8_t iff_rgba_tag[4] = { 'R', 'G', 'B', 'A' };
+constexpr uint8_t iff_tbhd_tag[4] = { 'T', 'B', 'H', 'D' };
+constexpr uint8_t iff_tbmp_tag[4] = { 'T', 'B', 'M', 'P' };
+constexpr uint8_t iff_zbuf_tag[4] = { 'Z', 'B', 'U', 'F' };
 
 bool
 IffInput::open(const std::string& name, ImageSpec& newspec,
@@ -153,7 +164,7 @@ IffInput::open(const std::string& name, ImageSpec& spec)
     //  TBHD <size> flags, width, height, compression ...
     //    AUTH <size> attribute ...
     //    DATE <size> attribute ...
-    //    FOR4 <size> TBMP
+    //    FOR4 <size> TBMP ...
     // Tiles:
     //       RGBA <size> tile pixels
     //       RGBA <size> tile pixels
@@ -244,8 +255,7 @@ IffInput::open(const std::string& name, ImageSpec& spec)
 bool
 IffInput::read_header()
 {
-    uint8_t type[4];
-    uint32_t size;
+    uint8_t chunktype[4];
     uint32_t chunksize;
     uint32_t tbhdsize;
     uint32_t flags;
@@ -255,33 +265,29 @@ IffInput::read_header()
 
     // read FOR4 <size> CIMG.
     for (;;) {
-        // get type and length
-        if (!read_typesize(type, size))
+        if (!read_chunk(chunktype, chunksize))
             return false;
 
-        chunksize = align_size(size, 4);
+        chunksize = align_chunk(chunksize, 4);
 
-        if (type[0] == 'F' && type[1] == 'O' && type[2] == 'R'
-            && type[3] == '4') {
-            // get type
-            if (!ioread(&type, 1, sizeof(type))) {
+        // chunk type: FOR4
+        if (std::memcmp(chunktype, iff_for4_tag, 4) == 0) {
+            if (!ioread(&chunktype, 1, sizeof(chunktype))) {
                 errorfmt("IFF error io seek failed for type");
                 return false;
             }
 
-            // check if CIMG
-            if (type[0] == 'C' && type[1] == 'I' && type[2] == 'M'
-                && type[3] == 'G') {
-                // read TBHD.
+            // chunk type: CIMG
+            if (std::memcmp(chunktype, iff_cimg_tag, 4) == 0) {
                 for (;;) {
-                    if (!read_typesize(type, size))
+                    if (!read_chunk(chunktype, chunksize))
                         return false;
 
-                    chunksize = align_size(size, 4);
+                    chunksize = align_chunk(chunksize, 4);
 
-                    if (type[0] == 'T' && type[1] == 'B' && type[2] == 'H'
-                        && type[3] == 'D') {
-                        tbhdsize = size;
+                    // chunk type: TBHD
+                    if (std::memcmp(chunktype, iff_tbhd_tag, 4) == 0) {
+                        tbhdsize = chunksize;
 
                         // test if table header size is correct
                         if (tbhdsize != 24 && tbhdsize != 32) {
@@ -326,29 +332,24 @@ IffInput::read_header()
                             return false;
                         }
 
-                        // test format.
+                        // RGB(A) format
                         if (flags & RGBA) {
                             // test if black is set
                             OIIO_DASSERT(!(flags & BLACK));
 
-                            // test for RGB channels.
                             if (flags & RGB)
                                 m_iff_header.channel_count = 3;
 
-                            // test for alpha channel
                             if (flags & ALPHA)
                                 m_iff_header.channel_count++;
 
-                            // set pixel bits
                             m_iff_header.channel_bits = bytes ? 16 : 8;
 
                             if (flags & ZBUFFER)
                                 m_iff_header.zbuffer_count = 1;
 
-                            // set zbuffer bits
                             m_iff_header.zbuffer_bits = 32;
                         }
-
                         // Z format.
                         else if (flags & ZBUFFER) {
                             m_iff_header.channel_count = 1;
@@ -357,56 +358,57 @@ IffInput::read_header()
                             OIIO_DASSERT(bytes == 0);
                         }
 
-                        // read AUTH, DATE or FOR4
-
+                        // read chunks
                         for (;;) {
                             // get type
-                            if (!read_typesize(type, size)) {
+                            if (!read_chunk(chunktype, chunksize)) {
                                 errorfmt("IFF error read type size failed");
                                 return false;
                             }
 
-                            chunksize = align_size(size, 4);
+                            chunksize = align_chunk(chunksize, 4);
 
-                            if (type[0] == 'A' && type[1] == 'U'
-                                && type[2] == 'T' && type[3] == 'H') {
+                            // chunk type: AUTH
+                            if (std::memcmp(chunktype, iff_auth_tag, 4) == 0) {
                                 std::vector<char> str(chunksize);
                                 if (!ioread(str.data(), 1, chunksize))
                                     return false;
                                 m_iff_header.author = std::string(str.data(),
-                                                                  size);
-                            } else if (type[0] == 'D' && type[1] == 'A'
-                                       && type[2] == 'T' && type[3] == 'E') {
+                                                                  chunksize);
+
+                                // chunk type: DATE
+                            } else if (std::memcmp(chunktype, iff_date_tag, 4)
+                                       == 0) {
                                 std::vector<char> str(chunksize);
                                 if (!ioread(str.data(), 1, chunksize))
                                     return false;
                                 m_iff_header.date = std::string(str.data(),
-                                                                size);
-                            } else if (type[0] == 'F' && type[1] == 'O'
-                                       && type[2] == 'R' && type[3] == '4') {
-                                if (!ioread(&type, 1, sizeof(type)))
+                                                                chunksize);
+
+                                // chunk type: FOR4
+                            } else if (std::memcmp(chunktype, iff_for4_tag, 4)
+                                       == 0) {
+                                if (!ioread(&chunktype, 1, sizeof(chunktype)))
                                     return false;
 
-                                // check if CIMG
-                                if (type[0] == 'T' && type[1] == 'B'
-                                    && type[2] == 'M' && type[3] == 'P') {
+                                // chunk type: TBMP
+                                if (std::memcmp(chunktype, iff_tbmp_tag, 4)
+                                    == 0) {
                                     // tbmp position for later user in in
                                     // read_native_tile
-
                                     m_iff_header.tbmp_start = iotell();
 
                                     // read first RGBA block to detect tile size.
-
                                     for (unsigned int t = 0;
                                          t < m_iff_header.tiles; t++) {
-                                        if (!read_typesize(type, size))
+                                        if (!read_chunk(chunktype, chunksize))
                                             return false;
-                                        chunksize = align_size(size, 4);
+                                        chunksize = align_chunk(chunksize, 4);
 
-                                        // check if RGBA
-                                        if (type[0] == 'R' && type[1] == 'G'
-                                            && type[2] == 'B'
-                                            && type[3] == 'A') {
+                                        // chunk type: RGBA
+                                        if (std::memcmp(chunktype, iff_rgba_tag,
+                                                        4)
+                                            == 0) {
                                             // get tile coordinates.
                                             uint16_t xmin, xmax, ymin, ymax;
                                             if (!read(&xmin) || !read(&ymin)
@@ -428,12 +430,13 @@ IffInput::read_header()
                                             // done, return
                                             return true;
                                         }
-
-                                        // skip to the next block.
-                                        if (!ioseek(chunksize, SEEK_CUR)) {
-                                            errorfmt(
-                                                "IFF error io seek failed");
-                                            return false;
+                                        else {
+                                            // skip to the next block.
+                                            if (!ioseek(chunksize, SEEK_CUR)) {
+                                                errorfmt(
+                                                    "IFF error io seek failed");
+                                                return false;
+                                            }
                                         }
                                     }
                                 } else {
@@ -453,20 +456,21 @@ IffInput::read_header()
                         }
                         // TBHD done, break
                         break;
-                    }
-
-                    // skip to the next block.
-                    if (!ioseek(chunksize, SEEK_CUR)) {
-                        errorfmt("IFF error io seek failed");
-                        return false;
+                    } else {
+                        // skip to the next block.
+                        if (!ioseek(chunksize, SEEK_CUR)) {
+                            errorfmt("IFF error io seek failed");
+                            return false;
+                        }
                     }
                 }
             }
-        }
-        // skip to the next block.
-        if (!ioseek(chunksize, SEEK_CUR)) {
-            errorfmt("IFF error io seek failed");
-            return false;
+        } else {
+            // skip to the next block.
+            if (!ioseek(chunksize, SEEK_CUR)) {
+                errorfmt("IFF error io seek failed");
+                return false;
+            }
         }
     }
     errorfmt("unknown error reading header");
@@ -532,10 +536,9 @@ bool inline IffInput::close(void)
 bool
 IffInput::readimg()
 {
-    uint8_t type[4];
-    uint32_t size;
+    uint8_t chunktype[4];
     uint32_t chunksize;
-
+    
     // seek pos
     // set position tile may be called randomly
     ioseek(m_tbmp_start);
@@ -545,16 +548,15 @@ IffInput::readimg()
 
     for (unsigned int t = 0; t < m_iff_header.tiles;) {
         // get type and length
-        if (!ioread(&type, 1, sizeof(type)) || !read(&size)) {
+        if (!read_chunk(chunktype, chunksize)) {
             errorfmt("IFF error io could not read rgb(a) type");
             return false;
         }
 
-        chunksize = align_size(size, 4);
+        chunksize = align_chunk(chunksize, 4);
 
-        // check if RGBA
-        if (type[0] == 'R' && type[1] == 'G' && type[2] == 'B'
-            && type[3] == 'A') {
+        // chunk type: RGBA
+        if (std::memcmp(chunktype, iff_rgba_tag, 4) == 0) {
             // get tile coordinates.
             uint16_t xmin, xmax, ymin, ymax;
             if (!read(&xmin) || !read(&ymin) || !read(&xmax) || !read(&ymax)) {
@@ -593,7 +595,7 @@ IffInput::readimg()
 
             // test if compressed
             // we use the non aligned size
-            if (tile_size > size) {
+            if (tile_size > chunksize) {
                 tile_compress = true;
             }
 
@@ -788,16 +790,15 @@ IffInput::readimg()
 
         if (m_iff_header.zbuffer_count) {
             // get type and length
-            if (!ioread(&type, 1, sizeof(type)) || !read(&size)) {
+            if (!read_chunk(chunktype, chunksize)) {
                 errorfmt("IFF error io could not read type");
                 return false;
             }
 
-            chunksize = align_size(size, 4);
+            chunksize = align_chunk(chunksize, 4);
 
-            // check if ZBUF
-            if (type[0] == 'Z' && type[1] == 'B' && type[2] == 'U'
-                && type[3] == 'F') {
+            // chunk type: ZBUF
+            if (std::memcmp(chunktype, iff_zbuf_tag, 4) == 0) {
                 // get tile coordinates.
                 uint16_t xmin, xmax, ymin, ymax;
                 if (!read(&xmin) || !read(&ymin) || !read(&xmax)
@@ -831,7 +832,7 @@ IffInput::readimg()
 
                 // if tile compression fails to be less than image data stored
                 // uncompressed the tile is written uncompressed
-                if (tile_size > size) {
+                if (tile_size > chunksize) {
                     tile_compress = true;
                 }
 
@@ -854,10 +855,11 @@ IffInput::readimg()
 
                     uncompress_rle_channel(&scratch[0], in_px,
                                            tw * th * sizeof(float));
+    
 
                     std::vector<float> realigned_data(
                         tw * th);  // Buffer for correctly aligned floats
-                    realign_uncompressed_rle_channel(&in[0],
+                    unpack_float_channel(&in[0],
                                                      realigned_data.data(),
                                                      tw * th);
                     float* pxp = &realigned_data[0];
@@ -874,15 +876,8 @@ IffInput::readimg()
                                            + px * m_iff_header.pixel_bytes()
                                            + (m_iff_header.channel_count
                                               * m_iff_header
-                                                    .channel_bytes()));  // Ensure correct placement
-
-
-                            // todo ms: this is not nice, for visualisation only
-                            float v = *pxp++;
-                            if (v < 0) {
-                                v = fabs(v) * 100;
-                            }
-                            *out_p = v;
+                                                    .channel_bytes()));
+                            *out_p = -1.0f / *pxp++;
                         }
                     }
                 } else {
@@ -953,12 +948,12 @@ IffInput::uncompress_rle_channel(const uint8_t* in, uint8_t* out, int size)
 
 
 void
-IffInput::realign_uncompressed_rle_channel(uint8_t* in, float* out, int size)
+IffInput::unpack_float_channel(uint8_t* in, float* out, int size)
 {
     for (int i = 0; i < size; i++) {
         uint32_t val = (in[i] << 24) | (in[i + size] << 16)
                        | (in[i + 2 * size] << 8) | (in[i + 3 * size]);
-        out[i] = reinterpret_cast<float&>(val);
+        std::memcpy(&out[i], &val, sizeof(float));
     }
 }
 

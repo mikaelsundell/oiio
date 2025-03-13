@@ -81,11 +81,9 @@ public:
     uint64_t image_bytes() const { return pixel_bytes() * width * height; }
 };
 
-
-
-// align size
+// align chunk
 inline uint32_t
-align_size(uint32_t size, uint32_t alignment)
+align_chunk(uint32_t size, uint32_t alignment)
 {
     uint32_t mod = size % alignment;
     if (mod) {
