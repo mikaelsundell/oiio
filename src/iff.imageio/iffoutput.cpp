@@ -32,7 +32,7 @@ public:
 
 private:
     std::string m_filename;
-    iff_pvt::IffFileHeader m_iff_header;
+    iff_pvt::IffFileHeader m_header;
     std::vector<uint8_t> m_buf;
     unsigned int m_dither;
     std::vector<uint8_t> scratch;
@@ -118,7 +118,7 @@ int
 IffOutput::supports(string_view feature) const
 {
     return (feature == "tiles" || feature == "alpha" || feature == "nchannels"
-            || feature == "ioproxy" || feature == "origin");
+            || feature == "ioproxy" || feature == "origin" || feature == "channelformats");
 }
 
 
@@ -151,7 +151,7 @@ IffOutput::open(const std::string& name, const ImageSpec& spec, OpenMode mode)
     // saving 'name' and 'spec' for later use
     m_filename = name;
 
-    if (!check_open(mode, spec, { 0, 8192, 0, 8192, 0, 1, 0, 4 }))
+    if (!check_open(mode, spec, { 0, 8192, 0, 8192, 0, 1, 0, 5 }))
         return false;
     // Maya docs say 8k is the limit
 
@@ -160,12 +160,26 @@ IffOutput::open(const std::string& name, const ImageSpec& spec, OpenMode mode)
     m_spec.tile_height = tile_height();
     m_spec.tile_depth  = 1;
 
-    // This implementation only supports writing RGB and RGBA images as IFF
-    if (m_spec.nchannels < 3 || m_spec.nchannels > 4) {
-        errorfmt("Cannot write IFF file with {} channels", m_spec.nchannels);
+    // Validate supported formats: RGB (3), RGBA (4), RGBAZ (5)
+    if (spec.nchannels < 3 || spec.nchannels > 5) {
+        errorfmt("Cannot write IFF file with {} channels (only RGB, RGBA, RGBAZ supported)", spec.nchannels);
         return false;
     }
 
+    TypeDesc base_format = spec.format;
+    if (base_format != TypeDesc::UINT8 && base_format != TypeDesc::UINT16) {
+        errorfmt("RGB(A) channels must be UINT8 or UINT16, found {}", base_format);
+        return false;
+    }
+
+    if (m_spec.z_channel) {
+        print("base_format: {}\n", base_format);
+        print("m_spec.z_channelm_spec.z_channel: {}\n", m_spec.z_channel);
+        
+        m_spec.channelformats.assign(m_spec.nchannels, base_format);
+        m_spec.channelformats[m_spec.z_channel] = TypeDesc::FLOAT;
+    }
+    
     uint64_t xtiles = tile_width_size(m_spec.width);
     uint64_t ytiles = tile_height_size(m_spec.height);
     if (xtiles * ytiles >= (1 << 16)) {  // The format can't store it!
@@ -178,13 +192,7 @@ IffOutput::open(const std::string& name, const ImageSpec& spec, OpenMode mode)
     ioproxy_retrieve_from_config(m_spec);
     if (!ioproxy_use_or_open(name))
         return false;
-
-    // IFF image files only supports UINT8 and UINT16.  If something
-    // else was requested, revert to the one most likely to be readable
-    // by any IFF reader: UINT8
-    if (m_spec.format != TypeDesc::UINT8 && m_spec.format != TypeDesc::UINT16)
-        m_spec.set_format(TypeDesc::UINT8);
-
+    
     m_dither = (m_spec.format == TypeDesc::UINT8)
                    ? m_spec.get_int_attribute("oiio:dither", 0)
                    : 0;
@@ -192,27 +200,29 @@ IffOutput::open(const std::string& name, const ImageSpec& spec, OpenMode mode)
     // check if the client wants the image to be run length encoded
     // currently only RGB RLE compression is supported, we default to RLE
     // as Maya does not handle non-compressed IFF's very well.
-    m_iff_header.compression
+    m_header.compression
         = (m_spec.get_string_attribute("compression") == "none") ? NONE : RLE;
 
     // we write the header of the file
-    m_iff_header.x             = m_spec.x;
-    m_iff_header.y             = m_spec.y;
-    m_iff_header.width         = m_spec.width;
-    m_iff_header.height        = m_spec.height;
-    m_iff_header.tiles         = xtiles * ytiles;
-    m_iff_header.channel_bits  = m_spec.format == TypeDesc::UINT8 ? 8 : 16;
-    m_iff_header.channel_count = m_spec.nchannels;
-    m_iff_header.author        = m_spec.get_string_attribute("Artist");
-    m_iff_header.date          = m_spec.get_string_attribute("DateTime");
+    m_header.x              = m_spec.x;
+    m_header.y              = m_spec.y;
+    m_header.width          = m_spec.width;
+    m_header.height         = m_spec.height;
+    m_header.tiles          = xtiles * ytiles;
+    m_header.channel_bits = m_spec.format == TypeDesc::UINT8 ? 8 : 16;
+    m_header.channel_count  = m_spec.z_channel ? spec.nchannels - 1 : spec.nchannels;
+    m_header.author         = m_spec.get_string_attribute("Artist");
+    m_header.date           = m_spec.get_string_attribute("DateTime");
+    m_header.zbuffer        = m_spec.z_channel ? spec.nchannels - 1 : 0;
+    m_header.zbuffer_bits   = m_spec.z_channel ? 32 : 0;
 
-    if (!write_header(m_iff_header)) {
+    if (!write_header(m_header)) {
         errorfmt("\"{}\": could not write iff header", m_filename);
         close();
         return false;
     }
 
-    m_buf.resize(m_spec.image_bytes());
+    m_buf.resize(m_header.image_bytes());
 
     return true;
 }
@@ -246,7 +256,17 @@ IffOutput::write_header(IffFileHeader& header)
         return false;
 
     // write flags and channels
-    if (!write_int(header.channel_count == 3 ? RGB : RGBA)
+    uint32_t flags = 0;
+    if (header.channel_count == 3)
+        flags |= RGB;
+    else if (header.channel_count == 4)
+        flags |= RGBA;
+    
+    if (header.zbuffer)
+        flags |= ZBUFFER;
+
+    // Write flags and channel properties
+    if (!write_int(flags)
         || !write_short(header.channel_bits == 8 ? 0 : 1)
         || !write_short(header.tiles))
         return false;
@@ -296,9 +316,9 @@ IffOutput::write_scanline(int y, int z, TypeDesc format, const void* data,
     // Emulate by copying the scanline to the buffer we're accumulating.
     std::vector<unsigned char> scratch;
     data = to_native_scanline(format, data, xstride, scratch, m_dither, y, z);
-    size_t scanlinesize = spec().scanline_bytes(true);
-    size_t offset       = scanlinesize * (y - spec().y)
-                    + scanlinesize * spec().height * (z - spec().z);
+    size_t scanlinesize = m_header.scanline_bytes();
+    size_t offset       = scanlinesize * (y - m_header.y)
+                    + scanlinesize * m_header.height * (z - m_header.z);
     memcpy(&m_buf[offset], data, scanlinesize);
     return false;
 }
@@ -317,29 +337,29 @@ IffOutput::write_tile(int x, int y, int z, TypeDesc format, const void* data,
     // auto stride
     m_spec.auto_stride(xstride, ystride, zstride, format, spec().nchannels,
                        spec().tile_width, spec().tile_height);
-
+          
     // native tile
     data = to_native_tile(format, data, xstride, ystride, zstride, scratch,
                           m_dither, x, y, z);
-
-    x -= m_spec.x;  // Account for offset, so x,y are file relative, not
-    y -= m_spec.y;  // image relative
+    
+    x -= m_header.x;  // Account for offset, so x,y are file relative, not
+    y -= m_header.y;  // image relative
 
     // tile size
-    int w  = m_spec.width;
-    int tw = std::min(x + m_spec.tile_width, m_spec.width) - x;
-    int th = std::min(y + m_spec.tile_height, m_spec.height) - y;
+    int w  = m_header.width;
+    int tw = std::min(x + tile_width(), m_header.width) - x;
+    int th = std::min(y + tile_height(), m_header.height) - y;
 
     // tile data
     int iy = 0;
     for (int oy = y; oy < y + th; oy++) {
         // in
         uint8_t* in_p = (uint8_t*)data
-                        + (iy * m_spec.tile_width) * m_spec.pixel_bytes();
+                        + (iy * m_spec.tile_width) * m_header.pixel_bytes();
         // out
-        uint8_t* out_p = &m_buf[0] + (oy * w + x) * m_spec.pixel_bytes();
+        uint8_t* out_p = &m_buf[0] + (oy * w + x) * m_header.pixel_bytes();
         // copy
-        memcpy(out_p, in_p, tw * m_spec.pixel_bytes());
+        memcpy(out_p, in_p, tw * m_header.pixel_bytes());
         iy++;
     }
 
@@ -355,30 +375,30 @@ IffOutput::close(void)
         // flip buffer to make write tile easier,
         // from tga.imageio:
 
-        int bytespp = m_spec.pixel_bytes();
+        int bytespp = m_header.pixel_bytes();
 
-        std::vector<unsigned char> fliptmp(m_spec.width * bytespp);
+        std::vector<unsigned char> fliptmp(m_header.width * bytespp);
         for (int y = 0; y < m_spec.height / 2; y++) {
             unsigned char* src
-                = &m_buf[(m_spec.height - y - 1) * m_spec.width * bytespp];
-            unsigned char* dst = &m_buf[y * m_spec.width * bytespp];
+                = &m_buf[(m_spec.height - y - 1) * m_header.width * bytespp];
+            unsigned char* dst = &m_buf[y * m_header.width * bytespp];
 
-            memcpy(fliptmp.data(), src, m_spec.width * bytespp);
-            memcpy(src, dst, m_spec.width * bytespp);
-            memcpy(dst, fliptmp.data(), m_spec.width * bytespp);
+            memcpy(fliptmp.data(), src, m_header.width * bytespp);
+            memcpy(src, dst, m_header.width * bytespp);
+            memcpy(dst, fliptmp.data(), m_header.width * bytespp);
         }
-
+        
         // write y-tiles
-        for (uint32_t ty = 0; ty < tile_height_size(m_spec.height); ty++) {
+        for (uint32_t ty = 0; ty < tile_height_size(m_header.height); ty++) {
             // write x-tiles
-            for (uint32_t tx = 0; tx < tile_width_size(m_spec.width); tx++) {
+            for (uint32_t tx = 0; tx < tile_width_size(m_header.width); tx++) {
                 // channels
-                uint8_t channels = m_iff_header.channel_count;
+                uint8_t channels = m_header.channel_count;
 
                 // set tile coordinates
                 uint32_t xmin = tx * tile_width();
                 uint32_t xmax
-                    = std::min(xmin + tile_width(), uint32_t(m_spec.width)) - 1;
+                    = std::min(xmin + tile_width(), uint32_t(m_header.width)) - 1;
                 uint32_t ymin = ty * tile_height();
                 uint32_t ymax = std::min(ymin + tile_height(),
                                          uint32_t(m_spec.height))
@@ -393,7 +413,7 @@ IffOutput::close(void)
                     return false;
 
                 // length.
-                uint32_t length = tw * th * m_spec.pixel_bytes();
+                uint32_t length = tw * th * m_header.channels_bytes();
 
                 // tile length.
                 uint32_t tile_length = length;
@@ -405,13 +425,12 @@ IffOutput::close(void)
                 length += 8;
 
                 // tile compression.
-                bool tile_compress = (m_iff_header.compression == RLE);
+                bool tile_compress = (m_header.compression == RLE);
 
                 // set bytes.
                 std::vector<uint8_t> scratch(tile_length);
-
                 uint8_t* out_p = static_cast<uint8_t*>(&scratch[0]);
-
+                
                 // handle 8-bit data
                 if (m_spec.format == TypeDesc::UINT8) {
                     if (tile_compress) {
@@ -422,7 +441,7 @@ IffOutput::close(void)
                         tmp.resize(tile_length * 2);
 
                         // map: RGB(A) to BGRA
-                        for (int c = (channels * m_spec.channel_bytes()) - 1;
+                        for (int c = m_header.channel_count - 1;
                              c >= 0; --c) {
                             std::vector<uint8_t> in(tw * th);
                             uint8_t* in_p = &in[0];
@@ -430,13 +449,12 @@ IffOutput::close(void)
                             // set tile
                             for (uint32_t py = ymin; py <= ymax; py++) {
                                 const uint8_t* in_dy
-                                    = &m_buf[0] + py * m_spec.scanline_bytes();
+                                    = &m_buf[0] + py * m_header.scanline_bytes();
 
                                 for (uint32_t px = xmin; px <= xmax; px++) {
                                     // get pixel
                                     uint8_t pixel;
-                                    const uint8_t* in_dx
-                                        = in_dy + px * m_spec.pixel_bytes() + c;
+                                    const uint8_t* in_dx = in_dy + px * m_header.pixel_bytes() + c;
                                     memcpy(&pixel, in_dx, 1);
                                     // set pixel
                                     *in_p++ = pixel;
@@ -479,8 +497,8 @@ IffOutput::close(void)
                     if (!tile_compress) {
                         for (uint32_t py = ymin; py <= ymax; py++) {
                             const uint8_t* in_dy = &m_buf[0]
-                                                   + (py * m_spec.width)
-                                                         * m_spec.pixel_bytes();
+                                                   + (py * m_header.width)
+                                                         * m_header.pixel_bytes();
 
                             for (uint32_t px = xmin; px <= xmax; px++) {
                                 // Map: RGB(A)8 RGBA to BGRA
@@ -488,8 +506,8 @@ IffOutput::close(void)
                                     // get pixel
                                     uint8_t pixel;
                                     const uint8_t* in_dx
-                                        = in_dy + px * m_spec.pixel_bytes()
-                                          + c * m_spec.channel_bytes();
+                                        = in_dy + px * m_header.pixel_bytes()
+                                          + c * m_header.channel_bytes();
                                     memcpy(&pixel, in_dx, 1);
                                     // set pixel
                                     *out_p++ = pixel;
@@ -512,7 +530,7 @@ IffOutput::close(void)
                         if (littleendian()) {
                             int rgb16[]  = { 0, 2, 4, 1, 3, 5 };
                             int rgba16[] = { 0, 2, 4, 7, 1, 3, 5, 6 };
-                            if (m_iff_header.channel_count == 3) {
+                            if (m_header.channel_count == 3) {
                                 map = std::vector<uint8_t>(rgb16, &rgb16[6]);
                             } else {
                                 map = std::vector<uint8_t>(rgba16, &rgba16[8]);
@@ -521,7 +539,7 @@ IffOutput::close(void)
                         } else {
                             int rgb16[]  = { 1, 3, 5, 0, 2, 4 };
                             int rgba16[] = { 1, 3, 5, 7, 0, 2, 4, 6 };
-                            if (m_iff_header.channel_count == 3) {
+                            if (m_header.channel_count == 3) {
                                 map = std::vector<uint8_t>(rgb16, &rgb16[6]);
                             } else {
                                 map = std::vector<uint8_t>(rgba16, &rgba16[8]);
@@ -539,13 +557,13 @@ IffOutput::close(void)
                             // set tile
                             for (uint32_t py = ymin; py <= ymax; py++) {
                                 const uint8_t* in_dy
-                                    = &m_buf[0] + py * m_spec.scanline_bytes();
+                                    = &m_buf[0] + py * m_header.scanline_bytes();
 
                                 for (uint32_t px = xmin; px <= xmax; px++) {
                                     // get pixel
                                     uint8_t pixel;
                                     const uint8_t* in_dx
-                                        = in_dy + px * m_spec.pixel_bytes()
+                                        = in_dy + px * m_header.pixel_bytes()
                                           + mc;
                                     memcpy(&pixel, in_dx, 1);
                                     // set pixel.
@@ -590,16 +608,16 @@ IffOutput::close(void)
                     if (!tile_compress) {
                         for (uint32_t py = ymin; py <= ymax; py++) {
                             const uint8_t* in_dy = &m_buf[0]
-                                                   + (py * m_spec.width)
-                                                         * m_spec.pixel_bytes();
+                                                   + (py * m_header.width)
+                                                         * m_header.pixel_bytes();
 
                             for (uint32_t px = xmin; px <= xmax; px++) {
                                 // map: RGB(A) to BGRA
                                 for (int c = channels - 1; c >= 0; --c) {
                                     uint16_t pixel;
                                     const uint8_t* in_dx
-                                        = in_dy + px * m_spec.pixel_bytes()
-                                          + c * m_spec.channel_bytes();
+                                        = in_dy + px * m_header.pixel_bytes()
+                                          + c * m_header.channel_bytes();
                                     memcpy(&pixel, in_dx, 2);
                                     if (littleendian())
                                         swap_endian(&pixel);
@@ -621,9 +639,47 @@ IffOutput::close(void)
                     || !write_short(xmax) || !write_short(ymax))
                     return false;
 
-                // write tile
+                // write rgba tile
                 if (!iowrite(scratch.data(), tile_length))
                     return false;
+                
+                if (m_header.zbuffer) {
+                    // write 'ZBUF' type
+                    if (!iowritefmt("ZBUF"))
+                        return false;
+                    
+                    // length.
+                    uint32_t length = tw * th * sizeof(float);
+                    
+                    // tile length.
+                    uint32_t tile_length = length;
+                    
+                    // align.
+                    length = align_chunk(length, 4);
+                    
+                    // append xmin, xmax, ymin and ymax.
+                    length += 8;
+                    
+                    // set bytes.
+                    std::vector<uint8_t> scratch(tile_length, 0);
+                    
+                    
+                    // fill in the scratch here
+                    
+                    // write 'ZBUF' length
+                    if (!write(&length))
+                        return false;
+
+                    // write xmin, xmax, ymin and ymax
+                    if (!write_short(xmin) || !write_short(ymin)
+                        || !write_short(xmax) || !write_short(ymax))
+                        return false;
+
+                    // write zbuffer tile
+                    if (!iowrite(scratch.data(), tile_length))
+                        return false;
+                    
+                }
             }
         }
 
@@ -631,7 +687,7 @@ IffOutput::close(void)
         uint32_t pos(iotell());
 
         uint32_t p0 = pos - 8;
-        uint32_t p1 = p0 - m_iff_header.for4_start;
+        uint32_t p1 = p0 - m_header.for4_start;
 
         // set pos
         ioseek(4);
@@ -641,7 +697,7 @@ IffOutput::close(void)
             return false;
 
         // set pos
-        ioseek(m_iff_header.for4_start + 4);
+        ioseek(m_header.for4_start + 4);
 
         // write FOR4 <size> TBMP
         if (!write(&p1))

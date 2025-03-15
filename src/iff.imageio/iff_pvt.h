@@ -41,18 +41,19 @@ const uint32_t BLACK   = 0x00000010;
 class IffFileHeader {
 public:
     // header information
-    uint32_t x;
-    uint32_t y;
-    uint32_t width;
-    uint32_t height;
-    uint32_t compression;
-    uint8_t channel_bits;
-    uint8_t channel_count;
-    uint8_t zbuffer_bits;
-    uint8_t zbuffer_count;
-    uint16_t tiles;
-    uint16_t tile_width;
-    uint16_t tile_height;
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t z = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t compression = 0;
+    uint8_t channel_bits = 0;
+    uint8_t channel_count = 0;
+    uint16_t tiles = 0;
+    uint16_t tile_width = 0;
+    uint16_t tile_height = 0;
+    uint8_t zbuffer = 0;
+    uint8_t zbuffer_bits = 0;
 
     // author string
     std::string author;
@@ -66,19 +67,45 @@ public:
     // for4 start
     uint32_t for4_start;
 
-    uint8_t channel_bytes() const { return (channel_bits / 8); }
-
-    uint8_t zbuffer_bytes() const
+    size_t channel_bytes() const
     {
-        return zbuffer_count ? (zbuffer_bits / 8) : 0;
+        return (channel_bits / 8);
+    }
+    
+    size_t channels_bytes() const
+    {
+        return channel_bytes() * channel_count ;
+    }
+    
+    size_t channels_scanline_bytes() const
+    {
+        return width * channels_bytes();
+    }
+    
+    size_t zbuffer_bytes() const
+    {
+        return zbuffer ? (zbuffer_bits / 8) : 0;
+    }
+    
+    size_t zbuffer_scanline_bytes() const
+    {
+        return width * zbuffer_bytes();
+    }
+    
+    size_t scanline_bytes() const
+    {
+        return width * pixel_bytes();
     }
 
-    uint8_t pixel_bytes() const
+    size_t pixel_bytes() const
     {
-        return channel_bytes() * channel_count + zbuffer_bytes();
+        return channels_bytes() + zbuffer_bytes();
     }
 
-    uint64_t image_bytes() const { return pixel_bytes() * width * height; }
+    size_t image_bytes() const
+    {
+        return pixel_bytes() * width * height;
+    }
 };
 
 // align chunk
