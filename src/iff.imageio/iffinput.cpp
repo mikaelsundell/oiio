@@ -731,8 +731,8 @@ IffInput::readimg()
                         }
                     }
 
-                    // map BGR(A)BGR(A) to RRGGBB(AA)
-                    for (int c = m_header.channel_count - 1;
+                    // use map BGR(A)BGR(A) to RRGGBB(AA)
+                    for (int c = (m_header.channel_count * m_header.channel_bytes()) - 1;
                          c >= 0; --c) {
                         int mc = map[c];
 
@@ -869,6 +869,13 @@ IffInput::readimg()
                 interleave_zbuffer_channel(&in[0],
                                                  realigned_data.data(),
                                                  tw * th);
+                
+                for (int i=0; i<realigned_data.size(); i++)
+                {
+                    //realigned_data[i] = 0.5;
+                }
+                
+                
                 float* pxp = &realigned_data[0];
 
                 // Set tile
@@ -884,8 +891,8 @@ IffInput::readimg()
                                        + (m_header.channel_count
                                           * m_header
                                                 .channel_bytes()));
-                        
-                        *out_p = -1.0f / *pxp++;
+        
+                        *out_p = *pxp++;
                         
                     }
                 }
