@@ -95,9 +95,6 @@ private:
     // helper to compress a rle channel
     size_t compress_rle_channel(const uint8_t* in, uint8_t* out, int size,
                                 cspan<uint8_t> in_span, span<uint8_t> out_span);
-
-    // helper to unpack (planar) zbuffer channel
-    void unpack_zbuffer_channel(const float* in, uint8_t* out, int size);
 };
 
 
@@ -148,8 +145,9 @@ IffOutput::open(const std::string& name, const ImageSpec& spec, OpenMode mode)
     //    FOR4 <size> TBMP
     // Tiles:
     //       RGBA <size> tile pixels
+    //       ZBUF <size> tile pixels
     //       RGBA <size> tile pixels
-    //       RGBA <size> tile pixels
+    //       ZBUF <size> tile pixels
     //       ...
 
     // saving 'name' and 'spec' for later use
@@ -410,7 +408,7 @@ IffOutput::close(void)
                 uint32_t th = ymax - ymin + 1;
 
                 // RGBA
-                {
+                if (m_header.rgba_count > 0) {
                     // channels
                     uint8_t channels = m_header.rgba_count;
 
@@ -421,29 +419,29 @@ IffOutput::close(void)
                     // length.
                     uint32_t length = tw * th * m_header.rgba_channels_bytes();
 
-                    // tile length.
+                    // tile length
                     uint32_t tile_length = length;
 
-                    // align.
+                    // align
                     length = align_chunk(length, 4);
 
-                    // append xmin, xmax, ymin and ymax.
+                    // append xmin, xmax, ymin and ymax
                     length += 8;
 
-                    // tile compression.
-                    bool tile_compress = (m_header.compression == RLE);
+                    // tile compression
+                    bool tile_compressed = (m_header.compression == RLE);
 
-                    // set bytes.
+                    // set bytes
                     std::vector<uint8_t> scratch(tile_length);
                     uint8_t* out_p = static_cast<uint8_t*>(scratch.data());
 
                     // handle 8-bit data
                     if (m_spec.format == TypeDesc::UINT8) {
-                        if (tile_compress) {
+                        if (tile_compressed) {
                             uint32_t index = 0, size = 0;
                             std::vector<uint8_t> tmp;
 
-                            // set bytes.
+                            // set bytes
                             tmp.resize(tile_length * 2);
 
                             // map: RGB(A) to BGRA
@@ -501,10 +499,10 @@ IffOutput::close(void)
                                     }
                                 }
                             } else {
-                                tile_compress = false;
+                                tile_compressed = false;
                             }
                         }
-                        if (!tile_compress) {
+                        if (!tile_compressed) {
                             for (uint32_t py = ymin; py <= ymax; py++) {
                                 const uint8_t* in_dy
                                     = m_buf.data()
@@ -512,7 +510,7 @@ IffOutput::close(void)
                                             * m_header.pixel_bytes();
 
                                 for (uint32_t px = xmin; px <= xmax; px++) {
-                                    // Map: RGB(A)8 RGBA to BGRA
+                                    // map: RGB(A)8 RGBA to BGRA
                                     for (int c = channels - 1; c >= 0; --c) {
                                         // get pixel
                                         uint8_t pixel;
@@ -530,7 +528,7 @@ IffOutput::close(void)
                     }
                     // handle 16-bit data
                     else if (m_spec.format == TypeDesc::UINT16) {
-                        if (tile_compress) {
+                        if (tile_compressed) {
                             uint32_t index = 0, size = 0;
                             std::vector<uint8_t> tmp;
 
@@ -622,11 +620,11 @@ IffOutput::close(void)
                                     }
                                 }
                             } else {
-                                tile_compress = false;
+                                tile_compressed = false;
                             }
                         }
 
-                        if (!tile_compress) {
+                        if (!tile_compressed) {
                             for (uint32_t py = ymin; py <= ymax; py++) {
                                 const uint8_t* in_dy
                                     = m_buf.data()
@@ -667,59 +665,60 @@ IffOutput::close(void)
                         return false;
                 }
 
+                // ZBUF
                 if (m_header.zbuffer) {
                     // write 'ZBUF' type
                     if (!iowritefmt("ZBUF"))
                         return false;
 
-                    // length.
+                    // length
                     uint32_t length = tw * th * m_header.zbuffer_bytes();
 
-                    // tile length.
+                    // tile length
                     uint32_t tile_length = length;
 
                     // align.
                     length = align_chunk(length, 4);
 
-                    // append xmin, xmax, ymin and ymax.
+                    // append xmin, xmax, ymin and ymax
                     length += 8;
 
-                    // set bytes.
+                    // set bytes
                     std::vector<uint8_t> scratch(tile_length, 0);
                     uint8_t* out_p = static_cast<uint8_t*>(scratch.data());
 
-                    std::vector<float> in(tw * th);
-                    float* in_p = &in[0];
-
-                    // set tile
-                    for (uint32_t py = ymin; py <= ymax; py++) {
-                        const uint8_t* in_dy = m_buf.data()
-                                               + py * m_header.scanline_bytes();
-
-                        for (uint32_t px = xmin; px <= xmax; px++) {
-                            // get pixel
-                            float pixel = 0;
-                            const uint8_t* in_dx
-                                = in_dy + px * m_header.pixel_bytes()
-                                  + m_header.rgba_channels_bytes();
-                            memcpy(&pixel, in_dx, m_header.zbuffer_bytes());
-
-                            // set pixel
-                            *in_p++ = pixel;
-                        }
-                    }
-
-                    std::vector<uint8_t> planar(tw * th
-                                                * m_header.zbuffer_bytes());
-                    unpack_zbuffer_channel(in.data(), planar.data(), tw * th);
-
-
+                    uint32_t index = 0, size = 0;
                     std::vector<uint8_t> tmp;
+
                     tmp.resize(tile_length * 2);
 
-                    uint32_t index = compress_rle_channel(
-                        planar.data(), tmp.data(),
-                        tw * th * m_header.zbuffer_bytes(), planar, tmp);
+                    for (int c = m_header.zbuffer_bytes() - 1; c >= 0; --c) {
+                        std::vector<uint8_t> in(tw * th);
+                        uint8_t* in_p = in.data();
+
+                        // set tile
+                        for (uint32_t py = ymin; py <= ymax; py++) {
+                            const uint8_t* in_dy
+                                = m_buf.data() + py * m_header.scanline_bytes();
+
+                            for (uint32_t px = xmin; px <= xmax; px++) {
+                                // get pixel
+                                uint8_t pixel;
+                                const uint8_t* in_dx
+                                    = in_dy + px * m_header.pixel_bytes()
+                                      + m_header.rgba_channels_bytes() + c;
+                                memcpy(&pixel, in_dx, 1);
+                                // set pixel.
+                                *in_p++ = pixel;
+                            }
+                        }
+
+                        // compress rle channel
+                        size = compress_rle_channel(in.data(),
+                                                    tmp.data() + index, tw * th,
+                                                    in, tmp);
+                        index += size;
+                    }
 
                     // always write RLE compressed for zbuffer
                     memcpy(scratch.data(), tmp.data(), index);
@@ -866,20 +865,6 @@ IffOutput::compress_rle_channel(const uint8_t* in, uint8_t* out, int size,
     }
     const size_t r = out - _out;
     return r;
-}
-
-void
-IffOutput::unpack_zbuffer_channel(const float* in, uint8_t* out, int size)
-{
-    for (int i = 0; i < size; i++) {
-        uint32_t val;
-        std::memcpy(&val, &in[i], m_header.zbuffer_bytes());
-
-        out[i]            = static_cast<uint8_t>(val >> 24);
-        out[i + size]     = static_cast<uint8_t>(val >> 16);
-        out[i + 2 * size] = static_cast<uint8_t>(val >> 8);
-        out[i + 3 * size] = static_cast<uint8_t>(val);
-    }
 }
 
 

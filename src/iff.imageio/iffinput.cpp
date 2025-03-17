@@ -509,7 +509,6 @@ IffInput::read_native_scanline(int /*subimage*/, int /*miplevel*/, int /*y*/,
 }
 
 
-
 bool
 IffInput::read_native_tile(int subimage, int miplevel, int x, int y, int /*z*/,
                            void* data)
@@ -605,7 +604,7 @@ IffInput::readimg()
             }
 
             // tile compress
-            bool tile_compress = false;
+            bool tile_compressed = false;
 
             // if tile compression fails to be less than image data stored
             // uncompressed the tile is written uncompressed
@@ -620,7 +619,7 @@ IffInput::readimg()
             // test if compressed
             // we use the non aligned size
             if (tile_size > size) {
-                tile_compress = true;
+                tile_compressed = true;
             }
 
             // handle 8-bit data.
@@ -639,7 +638,7 @@ IffInput::readimg()
                 uint8_t* p = scratch.data();
 
                 // tile compress
-                if (tile_compress) {
+                if (tile_compressed) {
                     // map BGR(A) to RGB(A)
                     for (int c = m_header.rgba_count - 1; c >= 0; --c) {
                         std::vector<uint8_t> in(tw * th);
@@ -700,7 +699,7 @@ IffInput::readimg()
                 // set tile data
                 uint8_t* p = scratch.data();
 
-                if (tile_compress) {
+                if (tile_compressed) {
                     // set map
                     std::vector<uint8_t> map;
                     if (littleendian()) {
@@ -794,6 +793,7 @@ IffInput::readimg()
 
             rgbatiles++;
 
+            // chunk type: ZBUF
         } else if (std::memcmp(chunktype, iff_zbuf_tag, 4) == 0) {
             // get tile coordinates.
             uint16_t xmin, xmax, ymin, ymax;
@@ -818,61 +818,41 @@ IffInput::readimg()
                 return false;
             }
 
-            // tile compress
-            bool tile_compress = false;
-
             // set tile size
-            uint32_t tile_size = tw * th * m_header.zbuffer_bytes() + 8;
-
-            // if tile compression fails to be less than image data stored
-            // uncompressed the tile is written uncompressed
-            if (tile_size > chunksize) {
-                tile_compress = true;
-            }
-
             std::vector<uint8_t> scratch;
 
             // set bytes.
             scratch.resize(image_size);
+
+            // zbuffer is always compressed in IFF
 
             if (!ioread(scratch.data(), 1, scratch.size())) {
                 errorfmt("IFF error io seek failed");
                 return false;
             }
 
-            if (tile_compress) {
-                std::vector<uint8_t> in(
-                    tw * th
-                    * m_header.zbuffer_bytes());  // Allocate storage for floats
+            // set tile data
+            uint8_t* p = scratch.data();
 
-                uint8_t* in_px = (uint8_t*)in.data();
+            for (int c = m_header.zbuffer_bytes() - 1; c >= 0; --c) {
+                std::vector<uint8_t> in(tw * th);
+                uint8_t* in_p = in.data();
 
-                uncompress_rle_channel(scratch.data(), in_px,
-                                       tw * th * m_header.zbuffer_bytes());
-
-
-                std::vector<float> pack(tw * th);
-                pack_zbuffer_channel(in.data(), pack.data(), tw * th);
-                float* pxp = pack.data();
+                // uncompress and increment
+                p += uncompress_rle_channel(p, in_p, tw * th);
 
                 // set tile
-                for (uint16_t py = ymin; py <= ymax; py++) {
-                    uint8_t* out_dy = m_buf.data()
-                                      + +(py * m_header.width)
+                for (uint32_t py = ymin; py <= ymax; py++) {
+                    uint8_t* out_dy = static_cast<uint8_t*>(m_buf.data())
+                                      + (py * m_header.width)
                                             * m_header.pixel_bytes();
 
                     for (uint16_t px = xmin; px <= xmax; px++) {
-                        float* out_p = (float*)(out_dy
-                                                + px * m_header.pixel_bytes()
-                                                + (m_header.rgba_count
-                                                   * m_header.channel_bytes()));
-
-                        *out_p = *pxp++;
+                        uint8_t* out_p = out_dy + px * m_header.pixel_bytes()
+                                         + m_header.rgba_channels_bytes() + c;
+                        *out_p++ = *in_p++;
                     }
                 }
-
-            } else {
-                OIIO_ASSERT("z-buffer data is not uncompressed");
             }
             ztiles++;
 
@@ -909,7 +889,6 @@ IffInput::uncompress_rle_channel(const uint8_t* in, uint8_t* out, int size)
 {
     const uint8_t* const _in = in;
     const uint8_t* const end = out + size;
-    int bytes                = 0;
 
     while (out < end) {
         const uint8_t count = (*in & 0x7f) + 1;
@@ -919,17 +898,14 @@ IffInput::uncompress_rle_channel(const uint8_t* in, uint8_t* out, int size)
         if (!run) {
             for (int i = 0; i < count; i++) {
                 *out++ = *in++;
-                bytes++;
             }
         } else {
             const uint8_t p = *in++;
             for (int i = 0; i < count; i++) {
                 *out++ = p;
-                bytes++;
             }
         }
     }
-    OIIO_ASSERT(bytes == size && "uncompressed bytes does not match size");
     return in - _in;
 }
 
