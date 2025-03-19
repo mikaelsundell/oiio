@@ -569,8 +569,8 @@ IffInput::readimg()
     // resize buffer
     m_buf.resize(m_header.image_bytes());
 
-    while (rgbatiles < m_header.tiles
-           || (ztiles < m_header.tiles && m_header.zbuffer)) {
+    while ((rgbatiles < m_header.tiles && m_header.rgba_count > 0)
+           || (ztiles < m_header.tiles && m_header.zbuffer > 0)) {
         // get type and length
         if (!read_chunk(chunktype, size)) {
             errorfmt("IFF error io could not read rgb(a) type");

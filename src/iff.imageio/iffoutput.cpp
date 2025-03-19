@@ -157,12 +157,7 @@ IffOutput::open(const std::string& name, const ImageSpec& spec, OpenMode mode)
         return false;
     // Maya docs say 8k is the limit
 
-    // tiles always
-    m_spec.tile_width  = tile_width();
-    m_spec.tile_height = tile_height();
-    m_spec.tile_depth  = 1;
-
-    // Validate supported formats: RGB (3), RGBA (4), RGBAZ (5)
+    // validate supported formats: RGB (3), RGBA (4), RGBAZ (5)
     if (spec.nchannels < 3 || spec.nchannels > 5) {
         errorfmt(
             "Cannot write IFF file with {} channels (only RGB, RGBA, RGBAZ supported)",
@@ -170,18 +165,36 @@ IffOutput::open(const std::string& name, const ImageSpec& spec, OpenMode mode)
         return false;
     }
 
+
+    // IFF image files only supports UINT8 and UINT16.  If something
+    // else was requested, revert to the one most likely to be readable
+    // by any IFF reader: UINT8
+
     TypeDesc base_format = spec.format;
     if (base_format != TypeDesc::UINT8 && base_format != TypeDesc::UINT16) {
-        errorfmt("RGB(A) channels must be UINT8 or UINT16, found {}",
-                 base_format);
-        return false;
+        errorfmt("Unsupported format {}. Converting to UINT8.", base_format);
+        base_format = TypeDesc::UINT8;
     }
 
+    // format
+    m_spec.set_format(base_format);
+
+    // zchannel
     bool has_z = m_spec.z_channel > 0;
     if (has_z) {
         m_spec.channelformats.assign(m_spec.nchannels, base_format);
         m_spec.channelformats[m_spec.z_channel] = TypeDesc::FLOAT;
     }
+
+
+    m_dither = (m_spec.format == TypeDesc::UINT8)
+                   ? m_spec.get_int_attribute("oiio:dither", 0)
+                   : 0;
+
+    // tiles always
+    m_spec.tile_width  = tile_width();
+    m_spec.tile_height = tile_height();
+    m_spec.tile_depth  = 1;
 
     uint64_t xtiles = tile_width_size(m_spec.width);
     uint64_t ytiles = tile_height_size(m_spec.height);
@@ -195,10 +208,6 @@ IffOutput::open(const std::string& name, const ImageSpec& spec, OpenMode mode)
     ioproxy_retrieve_from_config(m_spec);
     if (!ioproxy_use_or_open(name))
         return false;
-
-    m_dither = (m_spec.format == TypeDesc::UINT8)
-                   ? m_spec.get_int_attribute("oiio:dither", 0)
-                   : 0;
 
     // check if the client wants the image to be run length encoded
     // currently only RGB RLE compression is supported, we default to RLE
